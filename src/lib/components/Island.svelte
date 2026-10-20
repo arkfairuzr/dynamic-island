@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
   import { activeWidget, islandState, isHovered, type WidgetType } from '$lib/stores/island';
-  import Particles from './Particles.svelte';
+  import { tauriInvoke } from '$lib/utils/tauri';
   import MediaWidget from './MediaWidget.svelte';
   import SystemWidget from './SystemWidget.svelte';
   import WeatherWidget from './WeatherWidget.svelte';
@@ -8,40 +9,132 @@
   import TimerWidget from './TimerWidget.svelte';
   import ClipboardWidget from './ClipboardWidget.svelte';
 
-  let currentWidget: WidgetType = $state('system');
-  let currentState = $state<'compact' | 'expanded' | 'wide'>('compact');
-  let hovered = $state(false);
-  let now = $state(new Date());
-  let glowIntensity = $state(0);
-  let expandTimeout: ReturnType<typeof setTimeout> | undefined;
+  type Mode = 'idle' | 'media' | 'timer' | 'expanded' | 'wide';
 
-  // Sync stores
+  // Target size of the pill per mode (logical px).
+  const SIZES: Record<Mode, { w: number; h: number }> = {
+    idle: { w: 126, h: 34 },
+    media: { w: 230, h: 38 },
+    timer: { w: 200, h: 38 },
+    expanded: { w: 380, h: 280 },
+    wide: { w: 420, h: 200 },
+  };
+  const WINDOW_WIDTH = 440;
+  const WINDOW_TOP_GAP = 8;
+
+  let currentWidget: WidgetType = $state('system');
+  let expandedMode = $state<'expanded' | 'wide' | null>(null);
+  let hovered = $state(false);
+  let timerRemaining = $state(0);
+  let mediaPlaying = $state(false);
+  let collapseTimeout: ReturnType<typeof setTimeout> | undefined;
+
+  // Live activities shown while collapsed, in priority order.
+  const mode = $derived<Mode>(
+    expandedMode ?? (timerRemaining > 0 ? 'timer' : mediaPlaying ? 'media' : 'idle')
+  );
+  const target = $derived(SIZES[mode]);
+  const isOpen = $derived(expandedMode !== null);
+
   $effect(() => { activeWidget.set(currentWidget); });
-  $effect(() => { islandState.set(currentState); });
+  $effect(() => { islandState.set(isOpen ? (expandedMode as 'expanded' | 'wide') : 'compact'); });
   $effect(() => { isHovered.set(hovered); });
 
-  // Clock
+  // Poll the live activities (silently ignore backend errors / no player).
   $effect(() => {
-    const interval = setInterval(() => { now = new Date(); }, 1000);
-    return () => clearInterval(interval);
+    async function poll() {
+      try {
+        const t = await tauriInvoke<{ active: boolean; remaining_seconds: number }>('get_timer_status');
+        timerRemaining = t.active ? t.remaining_seconds : 0;
+      } catch { timerRemaining = 0; }
+      try {
+        const m = await tauriInvoke<{ playing: boolean } | null>('get_media_status');
+        mediaPlaying = !!m?.playing;
+      } catch { mediaPlaying = false; }
+    }
+    poll();
+    const id = setInterval(poll, 1000);
+    return () => clearInterval(id);
   });
 
-  // Glow pulse
+  // Spring physics: width, height and corner radius chase the target.
+  let width = $state(SIZES.idle.w);
+  let height = $state(SIZES.idle.h);
+  const radius = $derived(Math.min(height / 2, 38));
+
   $effect(() => {
-    let frame: number;
-    let t = 0;
-    function pulse() {
-      t += 0.03;
-      glowIntensity = (Math.sin(t) + 1) / 2;
-      frame = requestAnimationFrame(pulse);
+    const goalW = target.w;
+    const goalH = target.h;
+    let vw = 0;
+    let vh = 0;
+    let last = performance.now();
+    let frame = requestAnimationFrame(step);
+    const STIFFNESS = 220;
+    const DAMPING = 17;
+
+    function step(now: number) {
+      const dt = Math.min((now - last) / 1000, 1 / 30);
+      last = now;
+      vw += (-STIFFNESS * (width - goalW) - DAMPING * vw) * dt;
+      vh += (-STIFFNESS * (height - goalH) - DAMPING * vh) * dt;
+      width += vw * dt;
+      height += vh * dt;
+      const settled =
+        Math.abs(width - goalW) < 0.1 && Math.abs(height - goalH) < 0.1 &&
+        Math.abs(vw) < 0.1 && Math.abs(vh) < 0.1;
+      if (settled) {
+        width = goalW;
+        height = goalH;
+        return;
+      }
+      frame = requestAnimationFrame(step);
     }
-    pulse();
     return () => cancelAnimationFrame(frame);
   });
 
-  const timeStr = $derived(
-    now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
-  );
+  // Keep the transparent OS window just big enough so it never blocks clicks
+  // on the apps underneath. Grow immediately, shrink once the pill has settled.
+  let windowHeight = 0;
+  $effect(() => {
+    const needed = Math.ceil(Math.max(height, target.h)) + WINDOW_TOP_GAP * 2 + 8;
+    const settled = Math.abs(height - target.h) < 1;
+    if (needed > windowHeight || (settled && needed !== windowHeight)) {
+      windowHeight = needed;
+      getCurrentWindow()
+        .setSize(new LogicalSize(WINDOW_WIDTH, needed))
+        .catch(() => {});
+    }
+  });
+
+  function open(widget?: WidgetType) {
+    if (widget) currentWidget = widget;
+    expandedMode = currentWidget === 'media' ? 'wide' : 'expanded';
+  }
+
+  function collapse() {
+    expandedMode = null;
+  }
+
+  function selectWidget(w: WidgetType) {
+    currentWidget = w;
+    expandedMode = w === 'media' ? 'wide' : 'expanded';
+  }
+
+  function handleEnter() {
+    hovered = true;
+    clearTimeout(collapseTimeout);
+  }
+
+  function handleLeave() {
+    hovered = false;
+    if (isOpen) collapseTimeout = setTimeout(collapse, 2000);
+  }
+
+  function fmt(sec: number) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
 
   const widgets: { type: WidgetType; icon: string; label: string }[] = [
     { type: 'system', icon: '⚡', label: 'System' },
@@ -51,275 +144,126 @@
     { type: 'timer', icon: '⏱', label: 'Timer' },
     { type: 'clipboard', icon: '📋', label: 'Clips' },
   ];
-
-  function expand(widget?: WidgetType) {
-    if (widget) currentWidget = widget;
-    currentState = currentWidget === 'media' ? 'wide' : 'expanded';
-  }
-
-  function collapse() {
-    currentState = 'compact';
-  }
-
-  function toggleExpand() {
-    if (currentState === 'compact') {
-      expand();
-    } else {
-      collapse();
-    }
-  }
-
-  function selectWidget(w: WidgetType) {
-    currentWidget = w;
-    currentState = w === 'media' ? 'wide' : 'expanded';
-  }
-
-  function handleMouseEnter() {
-    hovered = true;
-    clearTimeout(expandTimeout);
-  }
-
-  function handleMouseLeave() {
-    hovered = false;
-    if (currentState !== 'compact') {
-      expandTimeout = setTimeout(collapse, 2000);
-    }
-  }
-
-  const islandWidth = $derived(
-    currentState === 'compact' ? 380 : currentState === 'wide' ? 420 : 380
-  );
-  const islandHeight = $derived(
-    currentState === 'compact' ? 48 : currentState === 'wide' ? 200 : 300
-  );
-
-  const glowColor = $derived(
-    `rgba(255, 45, 149, ${0.3 + glowIntensity * 0.25})`
-  );
-  const glowColor2 = $derived(
-    `rgba(0, 240, 255, ${0.2 + glowIntensity * 0.2})`
-  );
 </script>
 
 <div
-  class="island-wrapper"
-  style="width: {islandWidth}px; height: {islandHeight}px;"
+  class="island"
+  class:hovered
+  role="button"
+  tabindex="0"
+  style="width: {width}px; height: {height}px; border-radius: {radius}px;"
+  onmouseenter={handleEnter}
+  onmouseleave={handleLeave}
+  onclick={() => { if (!isOpen) open(mode === 'timer' ? 'timer' : mode === 'media' ? 'media' : undefined); }}
+  onkeydown={(e) => { if (e.key === 'Enter' && !isOpen) open(); }}
 >
-  <div
-    class="island"
-    class:compact={currentState === 'compact'}
-    class:expanded={currentState !== 'compact'}
-    class:hovered
-    role="button"
-    tabindex="0"
-    onmouseenter={handleMouseEnter}
-    onmouseleave={handleMouseLeave}
-    onclick={currentState === 'compact' ? () => toggleExpand() : undefined}
-    onkeydown={(e) => e.key === 'Enter' && toggleExpand()}
-    style="
-      --glow-1: {glowColor};
-      --glow-2: {glowColor2};
-      box-shadow:
-        0 0 15px {glowColor},
-        0 0 30px {glowColor2},
-        inset 0 0 20px rgba(255, 45, 149, 0.05);
-    "
-  >
-    <Particles />
-
-    <div class="island-content">
-      {#if currentState === 'compact'}
-        <!-- Compact: time + status dots -->
-        <div class="compact-content">
-          <div class="compact-left">
-            <span class="time-display">{timeStr}</span>
-          </div>
-          <div class="compact-right">
-            {#each widgets as w}
-              <button
-                class="status-dot"
-                class:active={currentWidget === w.type}
-                title={w.label}
-                onclick={(e: MouseEvent) => { e.stopPropagation(); expand(w.type); }}
-              >
-                <span class="dot-icon">{w.icon}</span>
-              </button>
-            {/each}
-          </div>
-        </div>
-      {:else}
-        <!-- Expanded: tab bar + widget -->
-        <div class="expanded-content">
-          <div class="tab-bar">
-            {#each widgets as w}
-              <button
-                class="tab-btn"
-                class:active={currentWidget === w.type}
-                onclick={() => selectWidget(w.type)}
-              >
-                <span class="tab-icon">{w.icon}</span>
-                <span class="tab-label">{w.label}</span>
-              </button>
-            {/each}
-            <button class="collapse-btn" onclick={collapse} title="Collapse">
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M3 5L7 9L11 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-              </svg>
-            </button>
-          </div>
-
-          <div class="widget-area">
-            {#if currentWidget === 'media'}
-              <MediaWidget />
-            {:else if currentWidget === 'system'}
-              <SystemWidget />
-            {:else if currentWidget === 'weather'}
-              <WeatherWidget />
-            {:else if currentWidget === 'notifications'}
-              <NotificationWidget />
-            {:else if currentWidget === 'timer'}
-              <TimerWidget />
-            {:else if currentWidget === 'clipboard'}
-              <ClipboardWidget />
-            {/if}
-          </div>
-        </div>
-      {/if}
+  {#if mode === 'media'}
+    <div class="activity">
+      <span class="note">♪</span>
+      <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     </div>
-  </div>
+  {:else if mode === 'timer'}
+    <div class="activity">
+      <span class="note">⏱</span>
+      <span class="timer-text">{fmt(timerRemaining)}</span>
+    </div>
+  {:else if isOpen}
+    <div class="expanded-content">
+      <div class="tab-bar">
+        {#each widgets as w}
+          <button
+            class="tab-btn"
+            class:active={currentWidget === w.type}
+            onclick={(e) => { e.stopPropagation(); selectWidget(w.type); }}
+          >
+            <span>{w.icon}</span>
+            <span class="tab-label">{w.label}</span>
+          </button>
+        {/each}
+        <button class="collapse-btn" onclick={(e) => { e.stopPropagation(); collapse(); }} title="Collapse">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M3 5L7 9L11 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="widget-area">
+        {#if currentWidget === 'media'}<MediaWidget />
+        {:else if currentWidget === 'system'}<SystemWidget />
+        {:else if currentWidget === 'weather'}<WeatherWidget />
+        {:else if currentWidget === 'notifications'}<NotificationWidget />
+        {:else if currentWidget === 'timer'}<TimerWidget />
+        {:else if currentWidget === 'clipboard'}<ClipboardWidget />
+        {/if}
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  .island-wrapper {
+  .island {
     position: fixed;
     top: 8px;
     left: 50%;
     transform: translateX(-50%);
-    transition:
-      width 0.4s cubic-bezier(0.34, 1.56, 0.64, 1),
-      height 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-    z-index: 9999;
-  }
-
-  .island {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    border-radius: 26px;
-    background: linear-gradient(
-      135deg,
-      rgba(26, 10, 46, 0.88) 0%,
-      rgba(10, 10, 26, 0.92) 50%,
-      rgba(26, 10, 46, 0.88) 100%
-    );
-    backdrop-filter: blur(24px) saturate(1.8);
-    -webkit-backdrop-filter: blur(24px) saturate(1.8);
-    border: 1px solid rgba(255, 45, 149, 0.2);
+    background: #000;
     overflow: hidden;
     cursor: default;
-    transition:
-      box-shadow 0.3s ease,
-      border-color 0.3s ease;
-    animation: glow-pulse 3s ease-in-out infinite;
+    z-index: 9999;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    user-select: none;
   }
 
-  .island.hovered {
-    border-color: rgba(255, 45, 149, 0.45);
-  }
+  .island:not(:has(.expanded-content)) { cursor: pointer; }
 
-  .island.compact {
-    cursor: pointer;
-  }
-
-  @keyframes glow-pulse {
-    0%, 100% {
-      border-color: rgba(255, 45, 149, 0.2);
-    }
-    50% {
-      border-color: rgba(0, 240, 255, 0.35);
-    }
-  }
-
-  .island-content {
-    position: relative;
-    z-index: 1;
-    width: 100%;
-    height: 100%;
-  }
-
-  /* Compact state */
-  .compact-content {
+  .activity {
     display: flex;
     align-items: center;
     justify-content: space-between;
     height: 100%;
     padding: 0 16px;
-    animation: fade-scale 0.3s ease;
+    color: #fff;
+    animation: fade-in 0.25s ease 0.08s both;
   }
 
-  .compact-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
+  .note { font-size: 14px; opacity: 0.9; }
 
-  .time-display {
+  .timer-text {
     font-size: 14px;
     font-weight: 600;
-    color: #fff;
-    letter-spacing: 0.5px;
-    text-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+    font-variant-numeric: tabular-nums;
+    color: #ff9f0a;
   }
 
-  .compact-right {
-    display: flex;
-    align-items: center;
-    gap: 4px;
+  .wave { display: flex; align-items: center; gap: 3px; height: 16px; }
+  .wave i {
+    width: 3px;
+    height: 100%;
+    border-radius: 2px;
+    background: #30d158;
+    transform-origin: center;
+    animation: bounce 0.9s ease-in-out infinite;
+  }
+  .wave i:nth-child(2) { animation-delay: 0.15s; }
+  .wave i:nth-child(3) { animation-delay: 0.3s; }
+  .wave i:nth-child(4) { animation-delay: 0.45s; }
+
+  @keyframes bounce {
+    0%, 100% { transform: scaleY(0.25); }
+    50% { transform: scaleY(1); }
   }
 
-  .status-dot {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    border: none;
-    background: rgba(255, 255, 255, 0.06);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    padding: 0;
-  }
-
-  .status-dot:hover {
-    background: rgba(255, 45, 149, 0.2);
-    transform: scale(1.15);
-  }
-
-  .status-dot.active {
-    background: rgba(255, 45, 149, 0.25);
-    box-shadow: 0 0 8px rgba(255, 45, 149, 0.4);
-  }
-
-  .dot-icon {
-    font-size: 12px;
-    line-height: 1;
-  }
-
-  /* Expanded state */
   .expanded-content {
     display: flex;
     flex-direction: column;
     height: 100%;
-    animation: fade-scale 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: fade-in 0.3s ease 0.1s both;
   }
 
   .tab-bar {
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 8px 10px 6px;
     flex-shrink: 0;
   }
 
@@ -327,38 +271,19 @@
     display: flex;
     align-items: center;
     gap: 3px;
-    padding: 4px 8px;
+    padding: 5px 9px;
     border: none;
-    border-radius: 12px;
+    border-radius: 14px;
     background: transparent;
     color: rgba(255, 255, 255, 0.5);
-    font-size: 11px;
+    font-size: 12px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background 0.2s ease, color 0.2s ease;
     white-space: nowrap;
   }
-
-  .tab-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.8);
-  }
-
-  .tab-btn.active {
-    background: linear-gradient(135deg, rgba(255, 45, 149, 0.25), rgba(0, 240, 255, 0.15));
-    color: #fff;
-    box-shadow: 0 0 10px rgba(255, 45, 149, 0.2);
-  }
-
-  .tab-icon {
-    font-size: 12px;
-    line-height: 1;
-  }
-
-  .tab-label {
-    font-size: 10px;
-    font-weight: 500;
-    letter-spacing: 0.3px;
-  }
+  .tab-btn:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+  .tab-btn.active { background: rgba(255, 255, 255, 0.16); color: #fff; }
+  .tab-label { font-size: 10px; font-weight: 500; }
 
   .collapse-btn {
     margin-left: auto;
@@ -366,36 +291,25 @@
     height: 24px;
     border-radius: 50%;
     border: none;
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.7);
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: all 0.2s ease;
     padding: 0;
   }
-
-  .collapse-btn:hover {
-    background: rgba(255, 45, 149, 0.2);
-    color: #fff;
-  }
+  .collapse-btn:hover { background: rgba(255, 255, 255, 0.22); color: #fff; }
 
   .widget-area {
     flex: 1;
     overflow: hidden;
-    padding: 8px 12px 10px;
+    padding: 4px 14px 12px;
     min-height: 0;
   }
 
-  @keyframes fade-scale {
-    from {
-      opacity: 0;
-      transform: scale(0.95);
-    }
-    to {
-      opacity: 1;
-      transform: scale(1);
-    }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 </style>
