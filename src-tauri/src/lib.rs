@@ -8,7 +8,6 @@ mod status;
 mod system;
 mod timer;
 mod weather;
-mod window;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -20,20 +19,25 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            eprintln!("[island] setup: begin");
             // Get the main window and configure it for dynamic island look
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
                 let _ = window.set_always_on_top(true);
                 let _ = window.set_skip_taskbar(true);
-                // Position and size are managed by the frontend.
+                // Center at top of screen
+                let monitor = window.current_monitor().ok().flatten();
+                if let Some(monitor) = monitor {
+                    let screen_width = monitor.size().width as f64 / monitor.scale_factor();
+                    let x = (screen_width / 2.0) - 220.0; // 440px wide window / 2
+                    // x is in logical pixels — use LogicalPosition so Tauri converts
+                    // correctly on HiDPI displays instead of misplacing the window.
+                    let _ = window.set_position(tauri::LogicalPosition::new(x, 10.0));
+                }
             }
-            eprintln!("[island] setup: done");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
-            window::frontend_log,
             apps::list_open_windows,
             apps::focus_window,
             status::get_status,

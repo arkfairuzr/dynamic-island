@@ -1,12 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
-  import {
-    getCurrentWindow,
-    currentMonitor,
-    LogicalSize,
-    LogicalPosition,
-  } from '@tauri-apps/api/window';
+  import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
   import { activeWidget, islandState, isHovered, type WidgetType } from '$lib/stores/island';
   import { tauriInvoke } from '$lib/utils/tauri';
   import AppsWidget from './AppsWidget.svelte';
@@ -19,55 +12,30 @@
   import ClipboardWidget from './ClipboardWidget.svelte';
 
   type Mode = 'idle' | 'media' | 'timer' | 'expanded' | 'wide';
-  type H = 'left' | 'center' | 'right';
-  type V = 'top' | 'bottom';
-  type Rect = { x: number; y: number; w: number; h: number };
 
-  // Pill size per mode in horizontal orientation (logical px). The collapsed
-  // modes are swapped to be tall instead of wide when docked to a side edge.
-  const BASE: Record<Mode, { w: number; h: number }> = {
+  // Target size of the pill per mode (logical px).
+  const SIZES: Record<Mode, { w: number; h: number }> = {
     idle: { w: 126, h: 34 },
     media: { w: 230, h: 38 },
     timer: { w: 200, h: 38 },
     expanded: { w: 380, h: 280 },
     wide: { w: 420, h: 200 },
   };
-  const PAD = 4; // transparent margin kept around the pill inside the OS window
-  const MARGIN = 6; // gap between the pill and the screen edge
-  const CHORD_MS = 150; // arrow keys pressed within this window count as one combination
-  const STORAGE_KEY = 'island-placement';
-
-  function sizeFor(mode: Mode, vertical: boolean) {
-    const s = BASE[mode];
-    return vertical && (mode === 'idle' || mode === 'media' || mode === 'timer')
-      ? { w: s.h, h: s.w }
-      : s;
-  }
-
-  const log = (msg: string) => { invoke('frontend_log', { msg }).catch(() => {}); };
-
-  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  const WINDOW_WIDTH = 440;
+  const WINDOW_TOP_GAP = 8;
 
   let currentWidget: WidgetType = $state('apps');
   let expandedMode = $state<'expanded' | 'wide' | null>(null);
   let hovered = $state(false);
   let timerRemaining = $state(0);
   let mediaPlaying = $state(false);
-
-  // Where the island lives: horizontally centred, or docked to the left/right
-  // edge as a vertical pill; either at the top or the bottom of the screen.
-  let placement = $state<{ h: H; v: V }>({ h: 'center', v: 'top' });
-  let screen = $state({ x: 0, y: 0, w: 1920, h: 1080 });
-  let ready = $state(false);
-  let winRect = $state<Rect>({ x: 0, y: 0, w: BASE.idle.w + PAD * 2, h: BASE.idle.h + PAD * 2 });
-
-  const vertical = $derived(placement.h !== 'center');
+  let collapseTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // Live activities shown while collapsed, in priority order.
   const mode = $derived<Mode>(
     expandedMode ?? (timerRemaining > 0 ? 'timer' : mediaPlaying ? 'media' : 'idle')
   );
-  const target = $derived(sizeFor(mode, vertical));
+  const target = $derived(SIZES[mode]);
   const isOpen = $derived(expandedMode !== null);
 
   $effect(() => { activeWidget.set(currentWidget); });
@@ -91,10 +59,10 @@
     return () => clearInterval(id);
   });
 
-  // Spring physics: width and height chase the target.
-  let width = $state(BASE.idle.w);
-  let height = $state(BASE.idle.h);
-  const radius = $derived(Math.min(Math.min(width, height) / 2, 38));
+  // Spring physics: width, height and corner radius chase the target.
+  let width = $state(SIZES.idle.w);
+  let height = $state(SIZES.idle.h);
+  const radius = $derived(Math.min(height / 2, 38));
 
   $effect(() => {
     const goalW = target.w;
@@ -126,148 +94,21 @@
     return () => cancelAnimationFrame(frame);
   });
 
-  // ── OS window geometry ────────────────────────────────────────────────────
-  // The transparent window is kept exactly as big as the pill (plus PAD) so it
-  // never blocks clicks or typing on the apps around it. It grows immediately
-  // and shrinks once the spring has settled.
-  let appliedInner = { w: 0, h: 0 };
-  const queue: { next: Rect | null; busy: boolean } = { next: null, busy: false };
-
-  async function pushRect(rect: Rect) {
-    queue.next = rect;
-    if (queue.busy) return;
-    queue.busy = true;
-    try {
-      const win = getCurrentWindow();
-      while (queue.next) {
-        const r = queue.next;
-        queue.next = null;
-        await win.setPosition(new LogicalPosition(r.x, r.y));
-        await win.setSize(new LogicalSize(r.w, r.h));
-      }
-    } catch (e) {
-      log(`moving the window failed: ${e}`);
-    } finally {
-      queue.busy = false;
+  // Keep the transparent OS window just big enough so it never blocks clicks
+  // on the apps underneath. Grow immediately, shrink once the pill has settled.
+  let windowHeight = 0;
+  $effect(() => {
+    const needed = Math.ceil(Math.max(height, target.h)) + WINDOW_TOP_GAP * 2 + 8;
+    const settled = Math.abs(height - target.h) < 1;
+    if (needed > windowHeight || (settled && needed !== windowHeight)) {
+      windowHeight = needed;
+      getCurrentWindow()
+        .setSize(new LogicalSize(WINDOW_WIDTH, needed))
+        .catch(() => {});
     }
-  }
-
-  $effect(() => {
-    if (!ready) return;
-    const settled = Math.abs(width - target.w) < 1 && Math.abs(height - target.h) < 1;
-    const innerW = Math.ceil(settled ? target.w : Math.max(target.w, appliedInner.w));
-    const innerH = Math.ceil(settled ? target.h : Math.max(target.h, appliedInner.h));
-    const W = innerW + PAD * 2;
-    const H = innerH + PAD * 2;
-
-    let x: number;
-    if (placement.h === 'left') x = screen.x + MARGIN - PAD;
-    else if (placement.h === 'right') x = screen.x + screen.w - MARGIN + PAD - W;
-    else x = screen.x + (screen.w - W) / 2;
-    const y =
-      placement.v === 'top'
-        ? screen.y + MARGIN - PAD
-        : screen.y + screen.h - MARGIN + PAD - H;
-
-    x = Math.round(x);
-    const yy = Math.round(y);
-
-    const prev = untrack(() => winRect);
-    if (prev.x === x && prev.y === yy && prev.w === W && prev.h === H) return;
-    appliedInner = { w: innerW, h: innerH };
-    winRect = { x, y: yy, w: W, h: H };
-    pushRect({ x, y: yy, w: W, h: H });
   });
-
-  // Pill position inside the window: glued to the edge it is docked to.
-  const pillLeft = $derived(
-    placement.h === 'left'
-      ? PAD
-      : placement.h === 'right'
-        ? winRect.w - PAD - width
-        : (winRect.w - width) / 2
-  );
-  const pillTop = $derived(placement.v === 'top' ? PAD : winRect.h - PAD - height);
-
-  async function refreshScreen() {
-    const m = await currentMonitor();
-    if (!m) return;
-    const s = m.scaleFactor;
-    screen = { x: m.position.x / s, y: m.position.y / s, w: m.size.width / s, h: m.size.height / s };
-  }
-
-  function savePlacement() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(placement));
-    } catch {}
-  }
-
-  function loadPlacement() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const p = JSON.parse(raw);
-      if (['left', 'center', 'right'].includes(p.h) && ['top', 'bottom'].includes(p.v)) {
-        placement = { h: p.h, v: p.v };
-      }
-    } catch {}
-  }
-
-  $effect(() => {
-    window.addEventListener('error', (e) => log(`js error: ${e.message}`));
-    window.addEventListener('unhandledrejection', (e) => log(`js rejection: ${e.reason}`));
-    log('island mounted');
-    (async () => {
-      try {
-        // Never wait forever for the monitor info: fall back to the browser's idea of the screen.
-        await Promise.race([
-          refreshScreen(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('monitor lookup timed out')), 2000)),
-        ]);
-      } catch (e) {
-        log(`monitor lookup failed (${e}); using browser screen size`);
-        screen = { x: 0, y: 0, w: window.screen.width, h: window.screen.height };
-      }
-      loadPlacement();
-      ready = true;
-      log(`ready: screen=${JSON.stringify(screen)} placement=${JSON.stringify(placement)}`);
-    })();
-  });
-
-  // ── Moving with the arrow keys ────────────────────────────────────────────
-  // ← → ↑ ↓ pick a spot; two keys pressed together combine (e.g. ↓ + → is the
-  // bottom-right corner). Only while the panel is open.
-  const chord = new Set<string>();
-  let chordTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function onKeyDown(e: KeyboardEvent) {
-    if (!isOpen || e.repeat || !e.key.startsWith('Arrow')) return;
-    const tag = (e.target as HTMLElement | null)?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // e.g. volume slider
-    e.preventDefault();
-    chord.add(e.key);
-    clearTimeout(chordTimer);
-    chordTimer = setTimeout(applyChord, CHORD_MS);
-  }
-
-  function applyChord() {
-    const left = chord.has('ArrowLeft');
-    const right = chord.has('ArrowRight');
-    const down = chord.has('ArrowDown');
-    chord.clear();
-    placement = {
-      h: left && !right ? 'left' : right && !left ? 'right' : 'center',
-      v: down ? 'bottom' : 'top',
-    };
-    savePlacement();
-  }
-
-  // ── Open / close ──────────────────────────────────────────────────────────
-  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
-  let openedAt = 0;
 
   function open(widget?: WidgetType) {
-    openedAt = performance.now();
     if (widget) currentWidget = widget;
     expandedMode = currentWidget === 'media' ? 'wide' : 'expanded';
   }
@@ -277,28 +118,18 @@
   }
 
   function selectWidget(w: WidgetType) {
-    openedAt = performance.now();
     currentWidget = w;
     expandedMode = w === 'media' ? 'wide' : 'expanded';
   }
 
-  function handleClick() {
-    if (!isOpen) open(mode === 'timer' ? 'timer' : mode === 'media' ? 'media' : 'apps');
-  }
-
   function handleEnter() {
     hovered = true;
-    clearTimeout(leaveTimer);
+    clearTimeout(collapseTimeout);
   }
 
-  // The panel closes as soon as the cursor leaves the island. The short delay
-  // (longer right after opening) only filters out the window resizing itself.
   function handleLeave() {
     hovered = false;
-    if (!isOpen) return;
-    clearTimeout(leaveTimer);
-    const sinceOpen = performance.now() - openedAt;
-    leaveTimer = setTimeout(() => { if (!hovered) collapse(); }, Math.max(120, 450 - sinceOpen));
+    if (isOpen) collapseTimeout = setTimeout(collapse, 150);
   }
 
   function fmt(sec: number) {
@@ -319,28 +150,24 @@
   ];
 </script>
 
-<svelte:window onkeydown={onKeyDown} />
-
 <div
   class="island"
   class:hovered
-  class:vertical
-  class:open={isOpen}
   role="button"
   tabindex="0"
-  style="left: {pillLeft}px; top: {pillTop}px; width: {width}px; height: {height}px; border-radius: {radius}px;"
+  style="width: {width}px; height: {height}px; border-radius: {radius}px;"
   onmouseenter={handleEnter}
   onmouseleave={handleLeave}
-  onclick={handleClick}
-  onkeydown={(e) => { if (e.key === 'Enter' && !isOpen) open('apps'); }}
+  onclick={() => { if (!isOpen) open(mode === 'timer' ? 'timer' : mode === 'media' ? 'media' : undefined); }}
+  onkeydown={(e) => { if (e.key === 'Enter' && !isOpen) open(); }}
 >
   {#if mode === 'media'}
-    <div class="activity" class:vertical>
+    <div class="activity">
       <span class="note">♪</span>
       <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     </div>
   {:else if mode === 'timer'}
-    <div class="activity" class:vertical>
+    <div class="activity">
       <span class="note">⏱</span>
       <span class="timer-text">{fmt(timerRemaining)}</span>
     </div>
@@ -357,6 +184,11 @@
             <span class="tab-label">{w.label}</span>
           </button>
         {/each}
+        <button class="collapse-btn" onclick={(e) => { e.stopPropagation(); collapse(); }} title="Collapse">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M3 5L7 9L11 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
       </div>
       <div class="widget-area">
         {#if currentWidget === 'apps'}<AppsWidget />
@@ -375,16 +207,19 @@
 
 <style>
   .island {
-    position: absolute;
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
     background: #000;
     overflow: hidden;
-    cursor: pointer;
+    cursor: default;
     z-index: 9999;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     user-select: none;
-    }
+  }
 
-  .island.open { cursor: default; }
+  .island:not(:has(.expanded-content)) { cursor: pointer; }
 
   .activity {
     display: flex;
@@ -396,11 +231,6 @@
     animation: fade-in 0.25s ease 0.08s both;
   }
 
-  .activity.vertical {
-    flex-direction: column;
-    padding: 16px 0;
-  }
-
   .note { font-size: 14px; opacity: 0.9; }
 
   .timer-text {
@@ -409,8 +239,6 @@
     font-variant-numeric: tabular-nums;
     color: #ff9f0a;
   }
-
-  .activity.vertical .timer-text { font-size: 12px; }
 
   .wave { display: flex; align-items: center; gap: 3px; height: 16px; }
   .wave i {
@@ -449,7 +277,7 @@
     display: flex;
     align-items: center;
     gap: 3px;
-    padding: 5px 7px;
+    padding: 5px 9px;
     border: none;
     border-radius: 14px;
     background: transparent;
@@ -463,6 +291,22 @@
   .tab-btn.active { background: rgba(255, 255, 255, 0.16); color: #fff; }
   .tab-label { font-size: 10px; font-weight: 500; }
   .tab-btn:not(.active) .tab-label { display: none; }
+
+  .collapse-btn {
+    margin-left: auto;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+  }
+  .collapse-btn:hover { background: rgba(255, 255, 255, 0.22); color: #fff; }
 
   .widget-area {
     flex: 1;
