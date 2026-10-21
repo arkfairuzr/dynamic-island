@@ -12,6 +12,62 @@ pub struct MediaStatus {
     pub player: String,
 }
 
+
+#[cfg(target_os = "windows")]
+mod win {
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSession as Session,
+        GlobalSystemMediaTransportControlsSessionManager as Manager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+    };
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+
+    pub fn current_session() -> Option<Session> {
+        // Command threads have no COM apartment yet; ignore "already initialised".
+        unsafe {
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        }
+        let manager = Manager::RequestAsync().ok()?.get().ok()?;
+        manager.GetCurrentSession().ok()
+    }
+
+    pub fn status() -> Option<super::MediaStatus> {
+        let session = current_session()?;
+        let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+        let playing = session
+            .GetPlaybackInfo()
+            .ok()?
+            .PlaybackStatus()
+            .ok()?
+            == PlaybackStatus::Playing;
+        let timeline = session.GetTimelineProperties().ok()?;
+        // TimeSpan is in 100ns ticks.
+        let position = timeline.Position().ok()?.Duration as f64 / 10_000_000.0;
+        let end = timeline.EndTime().ok()?.Duration as f64 / 10_000_000.0;
+        let start = timeline.StartTime().ok()?.Duration as f64 / 10_000_000.0;
+
+        Some(super::MediaStatus {
+            playing,
+            title: props.Title().ok()?.to_string(),
+            artist: props.Artist().ok()?.to_string(),
+            album: props.AlbumTitle().ok()?.to_string(),
+            album_art_url: None,
+            progress: (position - start).max(0.0),
+            duration: (end - start).max(0.0),
+            player: session
+                .SourceAppUserModelId()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        })
+    }
+
+    pub fn control(action: fn(&Session) -> windows::core::Result<bool>) -> bool {
+        current_session()
+            .and_then(|s| action(&s).ok())
+            .unwrap_or(false)
+    }
+}
+
 #[tauri::command]
 pub fn get_media_status() -> Option<MediaStatus> {
     #[cfg(target_os = "linux")]
@@ -58,8 +114,7 @@ pub fn get_media_status() -> Option<MediaStatus> {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows media session - simplified fallback
-        None
+        win::status()
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -78,7 +133,11 @@ pub fn media_play_pause() -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        win::control(|s| s.TryTogglePlayPauseAsync()?.get())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         false
     }
@@ -94,7 +153,11 @@ pub fn media_next() -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        win::control(|s| s.TrySkipNextAsync()?.get())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         false
     }
@@ -110,7 +173,11 @@ pub fn media_previous() -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        win::control(|s| s.TrySkipPreviousAsync()?.get())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         false
     }

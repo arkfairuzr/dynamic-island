@@ -26,4 +26,4 @@ sysinfo = "0.35"
 # Linux-specific deps can go here later
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Windows-specific deps can go here later
+windows = { version = "0.61", features = ["Foundation", "Media_Control", "Win32_System_WinRT"] }

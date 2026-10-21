@@ -22,15 +22,17 @@
     album_art_url: string;
   }
 
-  let media: MediaInfo = $state({
-    title: 'Sparkle',
-    artist: 'RADWIMPS',
-    album: 'Your Name OST',
-    is_playing: true,
-    position_seconds: 87,
-    duration_seconds: 253,
+  const NOTHING_PLAYING: MediaInfo = {
+    title: 'Nothing playing',
+    artist: '',
+    album: '',
+    is_playing: false,
+    position_seconds: 0,
+    duration_seconds: 0,
     album_art_url: '',
-  });
+  };
+
+  let media: MediaInfo = $state({ ...NOTHING_PLAYING });
 
   let progressPercent = $derived(
     media.duration_seconds > 0
@@ -49,8 +51,7 @@
 
   async function fetchMedia() {
     try {
-      // Backend returns null when no MPRIS player is active — keep current
-      // (demo) data instead of nulling the widget and crashing the template.
+      // Backend returns null when no player is active.
       const m = await tauriInvoke<RawMediaStatus | null>('get_media_status');
       if (m) {
         media = {
@@ -62,9 +63,11 @@
           duration_seconds: m.duration,
           album_art_url: m.album_art_url ?? '',
         };
+      } else {
+        media = { ...NOTHING_PLAYING };
       }
     } catch {
-      // keep demo data
+      media = { ...NOTHING_PLAYING };
     }
   }
 
