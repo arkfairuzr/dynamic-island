@@ -27,14 +27,12 @@ pub fn run() {
                 let _ = window.set_always_on_top(true);
                 let _ = window.set_skip_taskbar(true);
                 // Position and size are managed by the frontend.
-                window::prepare(&window);
             }
             eprintln!("[island] setup: done");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
-            window::set_window_rect,
             window::frontend_log,
             apps::list_open_windows,
             apps::focus_window,

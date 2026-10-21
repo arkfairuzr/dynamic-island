@@ -1,7 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { getCurrentWindow, currentMonitor } from '@tauri-apps/api/window';
+  import {
+    getCurrentWindow,
+    currentMonitor,
+    LogicalSize,
+    LogicalPosition,
+  } from '@tauri-apps/api/window';
   import { activeWidget, islandState, isHovered, type WidgetType } from '$lib/stores/island';
   import { tauriInvoke } from '$lib/utils/tauri';
   import AppsWidget from './AppsWidget.svelte';
@@ -133,13 +138,15 @@
     if (queue.busy) return;
     queue.busy = true;
     try {
+      const win = getCurrentWindow();
       while (queue.next) {
         const r = queue.next;
         queue.next = null;
-        await invoke('set_window_rect', { x: r.x, y: r.y, w: r.w, h: r.h });
+        await win.setPosition(new LogicalPosition(r.x, r.y));
+        await win.setSize(new LogicalSize(r.w, r.h));
       }
     } catch (e) {
-      log(`set_window_rect failed: ${e}`);
+      log(`moving the window failed: ${e}`);
     } finally {
       queue.busy = false;
     }
