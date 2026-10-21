@@ -9,6 +9,7 @@
   import { activeWidget, islandState, isHovered, type WidgetType } from '$lib/stores/island';
   import { tauriInvoke } from '$lib/utils/tauri';
   import AppsWidget from './AppsWidget.svelte';
+  import StatusWidget from './StatusWidget.svelte';
   import MediaWidget from './MediaWidget.svelte';
   import SystemWidget from './SystemWidget.svelte';
   import WeatherWidget from './WeatherWidget.svelte';
@@ -359,6 +360,7 @@
 
   const widgets: { type: WidgetType; icon: string; label: string }[] = [
     { type: 'apps', icon: '🪟', label: 'Apps' },
+    { type: 'status', icon: '🔋', label: 'Status' },
     { type: 'system', icon: '⚡', label: 'System' },
     { type: 'media', icon: '🎵', label: 'Media' },
     { type: 'weather', icon: '🌸', label: 'Weather' },
@@ -410,6 +412,7 @@
       </div>
       <div class="widget-area">
         {#if currentWidget === 'apps'}<AppsWidget />
+        {:else if currentWidget === 'status'}<StatusWidget />
         {:else if currentWidget === 'media'}<MediaWidget />
         {:else if currentWidget === 'system'}<SystemWidget />
         {:else if currentWidget === 'weather'}<WeatherWidget />

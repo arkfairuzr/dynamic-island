@@ -4,6 +4,7 @@ mod apps;
 mod clipboard;
 mod media;
 mod notifications;
+mod status;
 mod system;
 mod timer;
 mod weather;
@@ -31,6 +32,9 @@ pub fn run() {
             greet,
             apps::list_open_windows,
             apps::focus_window,
+            status::get_status,
+            status::set_volume,
+            status::set_muted,
             system::get_system_info,
             system::get_cpu_usage,
             system::get_memory_info,

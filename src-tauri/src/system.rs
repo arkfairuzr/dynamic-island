@@ -177,7 +177,17 @@ pub fn get_battery_info() -> BatteryInfo {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let battery = crate::status::get_status().battery;
+        BatteryInfo {
+            percent: battery.percent,
+            charging: battery.charging,
+            time_remaining: None,
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         BatteryInfo {
             percent: 100.0,
