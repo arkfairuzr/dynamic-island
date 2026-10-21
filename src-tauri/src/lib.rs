@@ -33,6 +33,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             window::set_window_rect,
+            window::frontend_log,
             apps::list_open_windows,
             apps::focus_window,
             status::get_status,

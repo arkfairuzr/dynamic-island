@@ -39,6 +39,8 @@
       : s;
   }
 
+  const log = (msg: string) => { invoke('frontend_log', { msg }).catch(() => {}); };
+
   const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
   let currentWidget: WidgetType = $state('apps');
@@ -137,7 +139,7 @@
         await invoke('set_window_rect', { x: r.x, y: r.y, w: r.w, h: r.h });
       }
     } catch (e) {
-      console.error('set_window_rect failed', e);
+      log(`set_window_rect failed: ${e}`);
     } finally {
       queue.busy = false;
     }
@@ -205,12 +207,23 @@
   }
 
   $effect(() => {
+    window.addEventListener('error', (e) => log(`js error: ${e.message}`));
+    window.addEventListener('unhandledrejection', (e) => log(`js rejection: ${e.reason}`));
+    log('island mounted');
     (async () => {
       try {
-        await refreshScreen();
-      } catch {}
+        // Never wait forever for the monitor info: fall back to the browser's idea of the screen.
+        await Promise.race([
+          refreshScreen(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('monitor lookup timed out')), 2000)),
+        ]);
+      } catch (e) {
+        log(`monitor lookup failed (${e}); using browser screen size`);
+        screen = { x: 0, y: 0, w: window.screen.width, h: window.screen.height };
+      }
       loadPlacement();
       ready = true;
+      log(`ready: screen=${JSON.stringify(screen)} placement=${JSON.stringify(placement)}`);
     })();
   });
 
