@@ -14,7 +14,8 @@
   import ClipboardWidget from './ClipboardWidget.svelte';
 
   type Mode = 'idle' | 'media' | 'timer' | 'expanded' | 'wide';
-  type Edge = 'top' | 'left' | 'right';
+  type H = 'left' | 'center' | 'right';
+  type V = 'top' | 'bottom';
   type Rect = { x: number; y: number; w: number; h: number };
 
   // Pill size per mode in horizontal orientation (logical px). The collapsed
@@ -28,9 +29,8 @@
   };
   const PAD = 4; // transparent margin kept around the pill inside the OS window
   const MARGIN = 6; // gap between the pill and the screen edge
-  const EDGE_ZONE = 100; // closer than this to a side edge => vertical pill
-  const DRAG_THRESHOLD = 5;
-  const STORAGE_KEY = 'island-anchor';
+  const CHORD_MS = 150; // arrow keys pressed within this window count as one combination
+  const STORAGE_KEY = 'island-placement';
 
   function sizeFor(mode: Mode, vertical: boolean) {
     const s = BASE[mode];
@@ -47,15 +47,14 @@
   let timerRemaining = $state(0);
   let mediaPlaying = $state(false);
 
-  // Where the island lives. For 'top' the anchor is the top-centre of the pill,
-  // for 'left'/'right' it is the centre of the edge the pill is attached to.
-  let edge = $state<Edge>('top');
-  let anchor = $state({ x: 0, y: 0 });
+  // Where the island lives: horizontally centred, or docked to the left/right
+  // edge as a vertical pill; either at the top or the bottom of the screen.
+  let placement = $state<{ h: H; v: V }>({ h: 'center', v: 'top' });
   let screen = $state({ x: 0, y: 0, w: 1920, h: 1080 });
   let ready = $state(false);
   let winRect = $state<Rect>({ x: 0, y: 0, w: BASE.idle.w + PAD * 2, h: BASE.idle.h + PAD * 2 });
 
-  const vertical = $derived(edge !== 'top');
+  const vertical = $derived(placement.h !== 'center');
 
   // Live activities shown while collapsed, in priority order.
   const mode = $derived<Mode>(
@@ -153,46 +152,33 @@
     const H = innerH + PAD * 2;
 
     let x: number;
-    let y: number;
-    if (edge === 'top') {
-      x = anchor.x - W / 2;
-      y = anchor.y - PAD;
-    } else if (edge === 'left') {
-      x = anchor.x - PAD;
-      y = anchor.y - H / 2;
-    } else {
-      x = anchor.x + PAD - W;
-      y = anchor.y - H / 2;
-    }
-    x = Math.round(clamp(x, screen.x, screen.x + screen.w - W));
-    y = Math.round(clamp(y, screen.y, screen.y + screen.h - H));
+    if (placement.h === 'left') x = screen.x + MARGIN - PAD;
+    else if (placement.h === 'right') x = screen.x + screen.w - MARGIN + PAD - W;
+    else x = screen.x + (screen.w - W) / 2;
+    const y =
+      placement.v === 'top'
+        ? screen.y + MARGIN - PAD
+        : screen.y + screen.h - MARGIN + PAD - H;
+
+    x = Math.round(x);
+    const yy = Math.round(y);
 
     const prev = untrack(() => winRect);
-    if (prev.x === x && prev.y === y && prev.w === W && prev.h === H) return;
+    if (prev.x === x && prev.y === yy && prev.w === W && prev.h === H) return;
     appliedInner = { w: innerW, h: innerH };
-    winRect = { x, y, w: W, h: H };
-    pushRect({ x, y, w: W, h: H });
+    winRect = { x, y: yy, w: W, h: H };
+    pushRect({ x, y: yy, w: W, h: H });
   });
 
-  // Pill position inside the window (stays glued to the anchor while it grows).
+  // Pill position inside the window: glued to the edge it is docked to.
   const pillLeft = $derived(
-    clamp(
-      (edge === 'top'
-        ? anchor.x - width / 2
-        : edge === 'left'
-          ? anchor.x
-          : anchor.x - width) - winRect.x,
-      PAD,
-      winRect.w - PAD - width
-    )
+    placement.h === 'left'
+      ? PAD
+      : placement.h === 'right'
+        ? winRect.w - PAD - width
+        : (winRect.w - width) / 2
   );
-  const pillTop = $derived(
-    clamp(
-      (edge === 'top' ? anchor.y : anchor.y - height / 2) - winRect.y,
-      PAD,
-      winRect.h - PAD - height
-    )
-  );
+  const pillTop = $derived(placement.v === 'top' ? PAD : winRect.h - PAD - height);
 
   async function refreshScreen() {
     const m = await currentMonitor();
@@ -201,115 +187,59 @@
     screen = { x: m.position.x / s, y: m.position.y / s, w: m.size.width / s, h: m.size.height / s };
   }
 
-  function saveAnchor() {
+  function savePlacement() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ edge, x: anchor.x, y: anchor.y }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(placement));
     } catch {}
   }
 
-  function loadAnchor(): { edge: Edge; x: number; y: number } | null {
+  function loadPlacement() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const a = JSON.parse(raw);
-      if (['top', 'left', 'right'].includes(a.edge) && Number.isFinite(a.x) && Number.isFinite(a.y)) return a;
+      if (!raw) return;
+      const p = JSON.parse(raw);
+      if (['left', 'center', 'right'].includes(p.h) && ['top', 'bottom'].includes(p.v)) {
+        placement = { h: p.h, v: p.v };
+      }
     } catch {}
-    return null;
   }
 
   $effect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
     (async () => {
       try {
         await refreshScreen();
       } catch {}
-      const saved = loadAnchor();
-      if (saved) {
-        edge = saved.edge;
-        anchor = {
-          x: clamp(saved.x, screen.x, screen.x + screen.w),
-          y: clamp(saved.y, screen.y, screen.y + screen.h),
-        };
-      } else {
-        edge = 'top';
-        anchor = { x: screen.x + screen.w / 2, y: screen.y + MARGIN + 2 };
-      }
+      loadPlacement();
       ready = true;
-      try {
-        const off = await getCurrentWindow().onMoved(onMoved);
-        if (cancelled) off();
-        else unlisten = off;
-      } catch {}
     })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
   });
 
-  // ── Dragging ──────────────────────────────────────────────────────────────
-  let downPos: { x: number; y: number } | null = null;
-  let dragStarted = false;
-  let userDragging = false;
-  let moveTimer: ReturnType<typeof setTimeout> | undefined;
+  // ── Moving with the arrow keys ────────────────────────────────────────────
+  // ← → ↑ ↓ pick a spot; two keys pressed together combine (e.g. ↓ + → is the
+  // bottom-right corner). Only while the panel is open.
+  const chord = new Set<string>();
+  let chordTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function onPointerDown(e: PointerEvent) {
-    dragStarted = false;
-    if (isOpen || e.button !== 0) return;
-    downPos = { x: e.screenX, y: e.screenY };
+  function onKeyDown(e: KeyboardEvent) {
+    if (!isOpen || e.repeat || !e.key.startsWith('Arrow')) return;
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // e.g. volume slider
+    e.preventDefault();
+    chord.add(e.key);
+    clearTimeout(chordTimer);
+    chordTimer = setTimeout(applyChord, CHORD_MS);
   }
 
-  function onPointerMove(e: PointerEvent) {
-    if (!downPos || isOpen || dragStarted) return;
-    if (Math.hypot(e.screenX - downPos.x, e.screenY - downPos.y) > DRAG_THRESHOLD) {
-      dragStarted = true;
-      userDragging = true;
-      downPos = null;
-      getCurrentWindow().startDragging().catch(() => { userDragging = false; });
-    }
-  }
-
-  function onPointerUp() {
-    downPos = null;
-  }
-
-  function onMoved() {
-    if (!userDragging) return; // ignore moves caused by our own setPosition
-    clearTimeout(moveTimer);
-    moveTimer = setTimeout(finishDrag, 250);
-  }
-
-  // After a drag: decide which edge the island belongs to and re-anchor it there.
-  async function finishDrag() {
-    try {
-      const win = getCurrentWindow();
-      const [pos, size, scale] = await Promise.all([win.outerPosition(), win.outerSize(), win.scaleFactor()]);
-      await refreshScreen();
-
-      const real = { x: pos.x / scale, y: pos.y / scale, w: size.width / scale, h: size.height / scale };
-      const cx = real.x + real.w / 2;
-      const cy = real.y + real.h / 2;
-      winRect = real; // keep the pill visually still while the anchor changes
-      appliedInner = { w: real.w - PAD * 2, h: real.h - PAD * 2 };
-
-      let next: Edge = 'top';
-      if (cx - screen.x < EDGE_ZONE) next = 'left';
-      else if (screen.x + screen.w - cx < EDGE_ZONE) next = 'right';
-
-      edge = next;
-      anchor =
-        next === 'top'
-          ? { x: cx, y: Math.max(real.y + PAD, screen.y + MARGIN) }
-          : next === 'left'
-            ? { x: screen.x + MARGIN, y: cy }
-            : { x: screen.x + screen.w - MARGIN, y: cy };
-      saveAnchor();
-    } catch {
-      // keep current placement
-    } finally {
-      userDragging = false;
-    }
+  function applyChord() {
+    const left = chord.has('ArrowLeft');
+    const right = chord.has('ArrowRight');
+    const down = chord.has('ArrowDown');
+    chord.clear();
+    placement = {
+      h: left && !right ? 'left' : right && !left ? 'right' : 'center',
+      v: down ? 'bottom' : 'top',
+    };
+    savePlacement();
   }
 
   // ── Open / close ──────────────────────────────────────────────────────────
@@ -333,10 +263,6 @@
   }
 
   function handleClick() {
-    if (dragStarted) {
-      dragStarted = false;
-      return;
-    }
     if (!isOpen) open(mode === 'timer' ? 'timer' : mode === 'media' ? 'media' : 'apps');
   }
 
@@ -349,7 +275,6 @@
   // (longer right after opening) only filters out the window resizing itself.
   function handleLeave() {
     hovered = false;
-    downPos = null;
     if (!isOpen) return;
     clearTimeout(leaveTimer);
     const sinceOpen = performance.now() - openedAt;
@@ -374,6 +299,8 @@
   ];
 </script>
 
+<svelte:window onkeydown={onKeyDown} />
+
 <div
   class="island"
   class:hovered
@@ -384,9 +311,6 @@
   style="left: {pillLeft}px; top: {pillTop}px; width: {width}px; height: {height}px; border-radius: {radius}px;"
   onmouseenter={handleEnter}
   onmouseleave={handleLeave}
-  onpointerdown={onPointerDown}
-  onpointermove={onPointerMove}
-  onpointerup={onPointerUp}
   onclick={handleClick}
   onkeydown={(e) => { if (e.key === 'Enter' && !isOpen) open('apps'); }}
 >
@@ -438,8 +362,7 @@
     z-index: 9999;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
     user-select: none;
-    touch-action: none;
-  }
+    }
 
   .island.open { cursor: default; }
 
