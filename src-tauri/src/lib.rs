@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+mod apps;
 mod clipboard;
 mod media;
 mod notifications;
@@ -22,20 +23,14 @@ pub fn run() {
                 let _ = window.set_decorations(false);
                 let _ = window.set_always_on_top(true);
                 let _ = window.set_skip_taskbar(true);
-                // Center at top of screen
-                let monitor = window.current_monitor().ok().flatten();
-                if let Some(monitor) = monitor {
-                    let screen_width = monitor.size().width as f64 / monitor.scale_factor();
-                    let x = (screen_width / 2.0) - 220.0; // 440px wide window / 2
-                    // x is in logical pixels — use LogicalPosition so Tauri converts
-                    // correctly on HiDPI displays instead of misplacing the window.
-                    let _ = window.set_position(tauri::LogicalPosition::new(x, 10.0));
-                }
+                // Position and size are managed by the frontend (draggable island).
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            apps::list_open_windows,
+            apps::focus_window,
             system::get_system_info,
             system::get_cpu_usage,
             system::get_memory_info,

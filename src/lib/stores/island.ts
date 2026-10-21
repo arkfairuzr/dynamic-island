@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type WidgetType = 'media' | 'system' | 'weather' | 'notifications' | 'timer' | 'clipboard';
+export type WidgetType = 'apps' | 'media' | 'system' | 'weather' | 'notifications' | 'timer' | 'clipboard';
 export type IslandState = 'compact' | 'expanded' | 'wide';
 
 export const activeWidget = writable<WidgetType>('system');
