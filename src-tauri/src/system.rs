@@ -134,7 +134,7 @@ pub fn get_disk_info() -> Vec<DiskInfo> {
                 } else {
                     0.0
                 },
-                fs_type: String::from_utf8_lossy(disk.file_system()).to_string(),
+                fs_type: disk.file_system().to_string_lossy().to_string(),
             }
         })
         .collect()
