@@ -11,12 +11,13 @@
   import TimerWidget from './TimerWidget.svelte';
   import ClipboardWidget from './ClipboardWidget.svelte';
 
-  type Mode = 'idle' | 'media' | 'timer' | 'expanded' | 'wide';
+  type Mode = 'idle' | 'media' | 'banner' | 'timer' | 'expanded' | 'wide';
 
   // Target size of the pill per mode (logical px).
   const SIZES: Record<Mode, { w: number; h: number }> = {
     idle: { w: 126, h: 34 },
-    media: { w: 230, h: 38 },
+    media: { w: 260, h: 38 },
+    banner: { w: 330, h: 64 },
     timer: { w: 200, h: 38 },
     expanded: { w: 380, h: 280 },
     wide: { w: 420, h: 200 },
@@ -29,11 +30,17 @@
   let hovered = $state(false);
   let timerRemaining = $state(0);
   let mediaPlaying = $state(false);
+  let mediaTitle = $state('');
+  let mediaArtist = $state('');
+  let bannerOn = $state(false);
+  let bannerTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastTrackKey = '';
   let collapseTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // Live activities shown while collapsed, in priority order.
   const mode = $derived<Mode>(
-    expandedMode ?? (timerRemaining > 0 ? 'timer' : mediaPlaying ? 'media' : 'idle')
+    expandedMode ??
+      (bannerOn ? 'banner' : timerRemaining > 0 ? 'timer' : mediaPlaying ? 'media' : 'idle')
   );
   const target = $derived(SIZES[mode]);
   const isOpen = $derived(expandedMode !== null);
@@ -50,8 +57,19 @@
         timerRemaining = t.active ? t.remaining_seconds : 0;
       } catch { timerRemaining = 0; }
       try {
-        const m = await tauriInvoke<{ playing: boolean } | null>('get_media_status');
-        mediaPlaying = !!m?.playing;
+        const m = await tauriInvoke<{ playing: boolean; title: string; artist: string } | null>('get_media_status');
+        const playing = !!m?.playing;
+        // Pop the pill open for a moment when a new track (or playback) starts.
+        const key = playing ? `${m?.title}|${m?.artist}` : '';
+        if (playing && key !== lastTrackKey) {
+          bannerOn = true;
+          clearTimeout(bannerTimer);
+          bannerTimer = setTimeout(() => { bannerOn = false; }, 3500);
+        }
+        lastTrackKey = key;
+        mediaPlaying = playing;
+        mediaTitle = m?.title ?? '';
+        mediaArtist = m?.artist ?? '';
       } catch { mediaPlaying = false; }
     }
     poll();
@@ -158,12 +176,22 @@
   style="width: {width}px; height: {height}px; border-radius: {radius}px;"
   onmouseenter={handleEnter}
   onmouseleave={handleLeave}
-  onclick={() => { if (!isOpen) open(mode === 'timer' ? 'timer' : mode === 'media' ? 'media' : undefined); }}
+  onclick={() => { if (!isOpen) open(mode === 'timer' ? 'timer' : mode === 'media' || mode === 'banner' ? 'media' : undefined); }}
   onkeydown={(e) => { if (e.key === 'Enter' && !isOpen) open(); }}
 >
-  {#if mode === 'media'}
+  {#if mode === 'banner'}
+    <div class="activity banner">
+      <span class="note big">♪</span>
+      <div class="meta">
+        <span class="b-title">{mediaTitle}</span>
+        <span class="b-artist">{mediaArtist}</span>
+      </div>
+      <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    </div>
+  {:else if mode === 'media'}
     <div class="activity">
       <span class="note">♪</span>
+      <span class="track">{mediaTitle}</span>
       <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     </div>
   {:else if mode === 'timer'}
@@ -232,6 +260,22 @@
   }
 
   .note { font-size: 14px; opacity: 0.9; }
+  .note.big { font-size: 22px; }
+
+  .track {
+    flex: 1;
+    min-width: 0;
+    margin: 0 10px;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .banner { gap: 12px; padding: 0 18px; }
+  .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .b-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .b-artist { font-size: 11px; color: rgba(255, 255, 255, 0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .timer-text {
     font-size: 14px;

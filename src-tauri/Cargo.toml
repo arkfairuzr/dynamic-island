@@ -28,6 +28,7 @@ sysinfo = "0.35"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Foundation",
+    "Foundation_Collections",
     "Media_Control",
     "Networking_Connectivity",
     "Win32_Foundation",

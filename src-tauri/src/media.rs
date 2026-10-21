@@ -15,6 +15,9 @@ pub struct MediaStatus {
 
 #[cfg(target_os = "windows")]
 mod win {
+    use std::sync::Mutex;
+
+    use windows::core::HSTRING;
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSession as Session,
         GlobalSystemMediaTransportControlsSessionManager as Manager,
@@ -22,43 +25,104 @@ mod win {
     };
     use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
+    /// Print a problem to the terminal once, not every second.
+    fn log_once(msg: &str) {
+        static LAST: Mutex<String> = Mutex::new(String::new());
+        if let Ok(mut last) = LAST.lock() {
+            if *last != msg {
+                eprintln!("[island] media: {msg}");
+                *last = msg.to_string();
+            }
+        }
+    }
+
+    fn is_playing(session: &Session) -> bool {
+        session
+            .GetPlaybackInfo()
+            .and_then(|info| info.PlaybackStatus())
+            .map(|status| status == PlaybackStatus::Playing)
+            .unwrap_or(false)
+    }
+
+    /// The session that is playing right now, else the system's current one.
     pub fn current_session() -> Option<Session> {
-        // Command threads have no COM apartment yet; ignore "already initialised".
+        // Pool threads have no COM apartment yet; ignore "already initialised".
         unsafe {
             let _ = RoInitialize(RO_INIT_MULTITHREADED);
         }
-        let manager = Manager::RequestAsync().ok()?.get().ok()?;
-        manager.GetCurrentSession().ok()
+        let manager = match Manager::RequestAsync().and_then(|op| op.get()) {
+            Ok(manager) => manager,
+            Err(e) => {
+                log_once(&format!("cannot open the media session manager: {e}"));
+                return None;
+            }
+        };
+
+        let mut fallback = manager.GetCurrentSession().ok();
+        if let Ok(sessions) = manager.GetSessions() {
+            for session in sessions {
+                if is_playing(&session) {
+                    return Some(session);
+                }
+                if fallback.is_none() {
+                    fallback = Some(session);
+                }
+            }
+        }
+        if fallback.is_none() {
+            log_once("no media session found");
+        }
+        fallback
     }
 
     pub fn status() -> Option<super::MediaStatus> {
         let session = current_session()?;
-        let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
-        let playing = session
-            .GetPlaybackInfo()
-            .ok()?
-            .PlaybackStatus()
-            .ok()?
-            == PlaybackStatus::Playing;
-        let timeline = session.GetTimelineProperties().ok()?;
-        // TimeSpan is in 100ns ticks.
-        let position = timeline.Position().ok()?.Duration as f64 / 10_000_000.0;
-        let end = timeline.EndTime().ok()?.Duration as f64 / 10_000_000.0;
-        let start = timeline.StartTime().ok()?.Duration as f64 / 10_000_000.0;
+        let props = match session.TryGetMediaPropertiesAsync().and_then(|op| op.get()) {
+            Ok(props) => props,
+            Err(e) => {
+                log_once(&format!("cannot read track info: {e}"));
+                return None;
+            }
+        };
+        let text = |r: windows::core::Result<HSTRING>| r.map(|h| h.to_string()).unwrap_or_default();
 
-        Some(super::MediaStatus {
-            playing,
-            title: props.Title().ok()?.to_string(),
-            artist: props.Artist().ok()?.to_string(),
-            album: props.AlbumTitle().ok()?.to_string(),
+        // TimeSpan is in 100ns ticks. Some apps do not report a timeline: that is fine.
+        let (progress, duration) = session
+            .GetTimelineProperties()
+            .ok()
+            .and_then(|t| {
+                Some((
+                    t.Position().ok()?.Duration,
+                    t.StartTime().ok()?.Duration,
+                    t.EndTime().ok()?.Duration,
+                ))
+            })
+            .map(|(pos, start, end)| {
+                (
+                    ((pos - start) as f64 / 10_000_000.0).max(0.0),
+                    ((end - start) as f64 / 10_000_000.0).max(0.0),
+                )
+            })
+            .unwrap_or((0.0, 0.0));
+
+        let status = super::MediaStatus {
+            playing: is_playing(&session),
+            title: text(props.Title()),
+            artist: text(props.Artist()),
+            album: text(props.AlbumTitle()),
             album_art_url: None,
-            progress: (position - start).max(0.0),
-            duration: (end - start).max(0.0),
-            player: session
-                .SourceAppUserModelId()
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-        })
+            progress,
+            duration,
+            player: text(session.SourceAppUserModelId()),
+        };
+        log_once(&format!(
+            "{} - {} ({}, {})",
+            status.artist,
+            status.title,
+            status.player,
+            if status.playing { "playing" } else { "paused" }
+        ));
+        Some(status)
     }
 
     pub fn control(action: fn(&Session) -> windows::core::Result<bool>) -> bool {
