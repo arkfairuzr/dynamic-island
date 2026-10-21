@@ -8,6 +8,7 @@ mod status;
 mod system;
 mod timer;
 mod weather;
+mod window;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -30,6 +31,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            window::set_window_rect,
             apps::list_open_windows,
             apps::focus_window,
             status::get_status,

@@ -1,11 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import {
-    getCurrentWindow,
-    currentMonitor,
-    LogicalSize,
-    LogicalPosition,
-  } from '@tauri-apps/api/window';
+  import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWindow, currentMonitor } from '@tauri-apps/api/window';
   import { activeWidget, islandState, isHovered, type WidgetType } from '$lib/stores/island';
   import { tauriInvoke } from '$lib/utils/tauri';
   import AppsWidget from './AppsWidget.svelte';
@@ -136,12 +132,10 @@
     if (queue.busy) return;
     queue.busy = true;
     try {
-      const win = getCurrentWindow();
       while (queue.next) {
         const r = queue.next;
         queue.next = null;
-        await win.setPosition(new LogicalPosition(r.x, r.y));
-        await win.setSize(new LogicalSize(r.w, r.h));
+        await invoke('set_window_rect', { x: r.x, y: r.y, w: r.w, h: r.h });
       }
     } catch {
       // window API unavailable (e.g. plain browser) — nothing to resize
@@ -319,7 +313,11 @@
   }
 
   // ── Open / close ──────────────────────────────────────────────────────────
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let openedAt = 0;
+
   function open(widget?: WidgetType) {
+    openedAt = performance.now();
     if (widget) currentWidget = widget;
     expandedMode = currentWidget === 'media' ? 'wide' : 'expanded';
   }
@@ -329,6 +327,7 @@
   }
 
   function selectWidget(w: WidgetType) {
+    openedAt = performance.now();
     currentWidget = w;
     expandedMode = w === 'media' ? 'wide' : 'expanded';
   }
@@ -343,13 +342,18 @@
 
   function handleEnter() {
     hovered = true;
+    clearTimeout(leaveTimer);
   }
 
-  // The panel closes the moment the cursor leaves the island.
+  // The panel closes as soon as the cursor leaves the island. The short delay
+  // (longer right after opening) only filters out the window resizing itself.
   function handleLeave() {
     hovered = false;
     downPos = null;
-    if (isOpen) collapse();
+    if (!isOpen) return;
+    clearTimeout(leaveTimer);
+    const sinceOpen = performance.now() - openedAt;
+    leaveTimer = setTimeout(() => { if (!hovered) collapse(); }, Math.max(120, 450 - sinceOpen));
   }
 
   function fmt(sec: number) {
@@ -430,7 +434,7 @@
     position: absolute;
     background: #000;
     overflow: hidden;
-    cursor: grab;
+    cursor: pointer;
     z-index: 9999;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
     user-select: none;
