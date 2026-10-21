@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Dynamic Island",
-        "width": 134,
-        "height": 42,
+        "width": 300,
+        "height": 100,
         "decorations": false,
         "transparent": true,
         "shadow": false,

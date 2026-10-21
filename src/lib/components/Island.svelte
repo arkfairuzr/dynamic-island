@@ -136,8 +136,8 @@
         queue.next = null;
         await invoke('set_window_rect', { x: r.x, y: r.y, w: r.w, h: r.h });
       }
-    } catch {
-      // window API unavailable (e.g. plain browser) — nothing to resize
+    } catch (e) {
+      console.error('set_window_rect failed', e);
     } finally {
       queue.busy = false;
     }

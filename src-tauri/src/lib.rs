@@ -25,7 +25,8 @@ pub fn run() {
                 let _ = window.set_decorations(false);
                 let _ = window.set_always_on_top(true);
                 let _ = window.set_skip_taskbar(true);
-                // Position and size are managed by the frontend (draggable island).
+                // Position and size are managed by the frontend.
+                window::prepare(&window);
             }
             Ok(())
         })
