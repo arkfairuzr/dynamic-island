@@ -50,6 +50,7 @@ pub fn run() {
             system::get_network_info,
             system::get_battery_info,
             media::get_media_status,
+            media::media_debug,
             media::media_play_pause,
             media::media_next,
             media::media_previous,

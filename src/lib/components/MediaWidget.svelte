@@ -49,6 +49,16 @@
     return `${m}:${sec.toString().padStart(2, '0')}`;
   }
 
+  let debug = $state('');
+
+  async function fetchDebug() {
+    try {
+      debug = await tauriInvoke<string>('media_debug');
+    } catch (e) {
+      debug = `media_debug failed: ${e}`;
+    }
+  }
+
   async function fetchMedia() {
     try {
       // Backend returns null when no player is active.
@@ -63,11 +73,14 @@
           duration_seconds: m.duration,
           album_art_url: m.album_art_url ?? '',
         };
+        debug = '';
       } else {
         media = { ...NOTHING_PLAYING };
+        await fetchDebug();
       }
-    } catch {
+    } catch (e) {
       media = { ...NOTHING_PLAYING };
+      debug = `get_media_status failed: ${e}`;
     }
   }
 
@@ -128,6 +141,7 @@
   <div class="info-section">
     <div class="track-info">
       <div class="track-title">{media.title}</div>
+      {#if debug}<div class="debug">{debug}</div>{/if}
       <div class="track-artist">{media.artist}</div>
     </div>
 
@@ -257,6 +271,14 @@
 
   .track-info {
     min-width: 0;
+  }
+
+  .debug {
+    font-size: 9px;
+    line-height: 1.3;
+    color: rgba(255, 255, 255, 0.4);
+    max-height: 36px;
+    overflow: hidden;
   }
 
   .track-title {

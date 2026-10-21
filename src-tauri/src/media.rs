@@ -1,5 +1,18 @@
 use serde::Serialize;
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
+
+/// Last thing the media reader had to say, shown in the Media widget for debugging.
+static LAST_NOTE: Mutex<String> = Mutex::new(String::new());
+static POLLS: AtomicU32 = AtomicU32::new(0);
+
+fn set_note(msg: &str) {
+    if let Ok(mut note) = LAST_NOTE.lock() {
+        *note = msg.to_string();
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct MediaStatus {
     pub playing: bool,
@@ -27,6 +40,7 @@ mod win {
 
     /// Print a problem to the terminal once, not every second.
     fn log_once(msg: &str) {
+        super::set_note(msg);
         static LAST: Mutex<String> = Mutex::new(String::new());
         if let Ok(mut last) = LAST.lock() {
             if *last != msg {
@@ -133,6 +147,7 @@ mod win {
 }
 
 fn media_status_blocking() -> Option<MediaStatus> {
+    POLLS.fetch_add(1, Ordering::Relaxed);
     #[cfg(target_os = "linux")]
     {
         // Try to get MPRIS media info via playerctl
@@ -266,4 +281,15 @@ pub async fn media_next() -> bool {
 #[tauri::command]
 pub async fn media_previous() -> bool {
     tokio::task::spawn_blocking(previous_blocking).await.unwrap_or(false)
+}
+
+/// Why the media reader returned what it did (for the Media widget).
+#[tauri::command]
+pub fn media_debug() -> String {
+    let note = LAST_NOTE.lock().map(|n| n.clone()).unwrap_or_default();
+    format!(
+        "reader v3, polls={}, {}",
+        POLLS.load(Ordering::Relaxed),
+        if note.is_empty() { "no message yet" } else { &note }
+    )
 }
