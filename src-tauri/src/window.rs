@@ -58,6 +58,7 @@ mod win {
 
     /// Startup: plain popup, idle-pill size, top centre of the screen.
     pub fn prepare(hwnd: HWND) {
+        eprintln!("[island] placement thread started");
         store(hwnd);
         let scale = scale(hwnd);
         let w = (134.0 * scale).round() as i32;
@@ -100,13 +101,23 @@ mod win {
     }
 }
 
-/// Called once at startup, before the frontend has loaded.
+/// Called once from `setup`. Only grabs the window handle there; the window
+/// restyling runs on its own thread a moment later, because changing window
+/// styles from inside Tauri's own message handling can deadlock the UI thread.
 pub fn prepare(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
         use std::ffi::c_void;
+        eprintln!("[island] prepare: getting window handle");
         match window.hwnd() {
-            Ok(raw) => win::prepare(windows::Win32::Foundation::HWND(raw.0 as isize as *mut c_void)),
+            Ok(raw) => {
+                let raw = raw.0 as isize;
+                eprintln!("[island] prepare: got handle, scheduling placement");
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    win::prepare(windows::Win32::Foundation::HWND(raw as *mut c_void));
+                });
+            }
             Err(e) => eprintln!("[island] prepare: no hwnd: {e}"),
         }
     }

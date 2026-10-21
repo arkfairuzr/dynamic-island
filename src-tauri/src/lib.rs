@@ -20,6 +20,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            eprintln!("[island] setup: begin");
             // Get the main window and configure it for dynamic island look
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_decorations(false);
@@ -28,6 +29,7 @@ pub fn run() {
                 // Position and size are managed by the frontend.
                 window::prepare(&window);
             }
+            eprintln!("[island] setup: done");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
