@@ -12,8 +12,7 @@ pub struct OpenWindow {
 #[path = "apps_win.rs"]
 mod win;
 
-#[tauri::command]
-pub fn list_open_windows() -> Vec<OpenWindow> {
+fn list_blocking() -> Vec<OpenWindow> {
     #[cfg(target_os = "windows")]
     {
         win::list()
@@ -24,8 +23,7 @@ pub fn list_open_windows() -> Vec<OpenWindow> {
     }
 }
 
-#[tauri::command]
-pub fn focus_window(id: i64) -> bool {
+fn focus_blocking(id: i64) -> bool {
     #[cfg(target_os = "windows")]
     {
         win::focus(id)
@@ -35,4 +33,18 @@ pub fn focus_window(id: i64) -> bool {
         let _ = id;
         false
     }
+}
+
+#[tauri::command]
+pub async fn list_open_windows() -> Vec<OpenWindow> {
+    tokio::task::spawn_blocking(list_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn focus_window(id: i64) -> bool {
+    tokio::task::spawn_blocking(move || focus_blocking(id))
+        .await
+        .unwrap_or(false)
 }

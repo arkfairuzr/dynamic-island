@@ -68,8 +68,7 @@ mod win {
     }
 }
 
-#[tauri::command]
-pub fn get_media_status() -> Option<MediaStatus> {
+fn media_status_blocking() -> Option<MediaStatus> {
     #[cfg(target_os = "linux")]
     {
         // Try to get MPRIS media info via playerctl
@@ -123,8 +122,7 @@ pub fn get_media_status() -> Option<MediaStatus> {
     }
 }
 
-#[tauri::command]
-pub fn media_play_pause() -> bool {
+fn play_pause_blocking() -> bool {
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("playerctl")
@@ -143,8 +141,7 @@ pub fn media_play_pause() -> bool {
     }
 }
 
-#[tauri::command]
-pub fn media_next() -> bool {
+fn next_blocking() -> bool {
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("playerctl")
@@ -163,8 +160,7 @@ pub fn media_next() -> bool {
     }
 }
 
-#[tauri::command]
-pub fn media_previous() -> bool {
+fn previous_blocking() -> bool {
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("playerctl")
@@ -181,4 +177,29 @@ pub fn media_previous() -> bool {
     {
         false
     }
+}
+
+// The Windows media API blocks until it completes and needs a free message
+// pump, so these must never run on the UI thread: run them on the blocking pool.
+#[tauri::command]
+pub async fn get_media_status() -> Option<MediaStatus> {
+    tokio::task::spawn_blocking(media_status_blocking)
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
+pub async fn media_play_pause() -> bool {
+    tokio::task::spawn_blocking(play_pause_blocking).await.unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn media_next() -> bool {
+    tokio::task::spawn_blocking(next_blocking).await.unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn media_previous() -> bool {
+    tokio::task::spawn_blocking(previous_blocking).await.unwrap_or(false)
 }
